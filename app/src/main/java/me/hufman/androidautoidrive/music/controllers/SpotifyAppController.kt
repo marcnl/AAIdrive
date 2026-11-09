@@ -785,10 +785,43 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote, val w
 			}
 		} else {
 			loadPaginatedItems(directory.toListItem(), { !deferred.isCancelled }) { results ->
-				deferred.complete(results.filterNot { it.title == SpotifyWebApi.LIKED_SONGS_PLAYLIST_NAME || it.title == SpotifyWebApi.ARTIST_SONGS_PLAYLIST_NAME })
+				val filtered = results.filterNot { it.title == SpotifyWebApi.LIKED_SONGS_PLAYLIST_NAME || it.title == SpotifyWebApi.ARTIST_SONGS_PLAYLIST_NAME }
+				val playlistUri = directory.mediaId
+				if (playlistUri.startsWith("spotify:playlist:") && webApi.isAuthorized()) {
+					// The app remote API can return a truncated playlist (it stops at ~350 tracks
+					// until Spotify has fully cached the playlist), so cross-check against the Web API
+					GlobalScope.launch(defaultDispatcher) {
+						deferred.complete(preferCompletePlaylist(filtered, playlistUri))
+					}
+				} else {
+					deferred.complete(filtered)
+				}
 			}
 		}
 		return deferred.await()
+	}
+
+	/**
+	 * Returns the Web API's version of the playlist if it holds more tracks than the
+	 * app remote's, otherwise the app remote's. The Web API pages reliably to the end.
+	 * Tracks are shaped like the app remote's browse items so that playback is unchanged.
+	 */
+	private suspend fun preferCompletePlaylist(appRemoteItems: List<MusicMetadata>, playlistUri: String): List<MusicMetadata> {
+		val webItems = try {
+			webApi.getPlaylistSongs(this, playlistUri)
+		} catch (e: Exception) {
+			Log.w(TAG, "Unable to cross-check playlist $playlistUri against the Web API", e)
+			null
+		}
+		if (webItems == null || webItems.size <= appRemoteItems.size) {
+			return appRemoteItems
+		}
+		Log.i(TAG, "App remote returned ${appRemoteItems.size} tracks but the Web API has ${webItems.size} for $playlistUri, using the Web API list")
+		return webItems.map {
+			SpotifyMusicMetadata(this, mediaId = it.mediaId, queueId = it.queueId, coverArtUri = it.coverArtUri,
+					title = it.title, artist = it.artist, album = it.album, subtitle = it.artist,
+					playable = true, browseable = false)
+		}
 	}
 
 	/**
